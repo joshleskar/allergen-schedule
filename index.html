@@ -555,7 +555,13 @@ function scienceNotes() {
   return html;
 }
 
-function changeDay(delta) {
+function supportLine() {
+  return `<div class="support-line">
+    If this app helps your family, please consider supporting this work <a href="https://paypal.me/JoshuaLeskar">via PayPal</a> or <a href="https://venmo.com/JLeskar">Venmo</a>. 💙
+  </div>`;
+}
+  
+  function changeDay(delta) {
   const next = currentDay + delta;
   if (next < 1 || next > SCHEDULE.length) return;
   currentDay = next;
