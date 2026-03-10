@@ -239,202 +239,153 @@ function hex2rgba(hex, alpha) {
 function getAllergen(id) { return ALL_ALLERGENS.find(a => a.id === id); }
 
 /**
- * Given a list of confirmed allergens (objects), generate a 7-day rotation
- * where each allergen appears exactly `targetFreq` times per week.
- * Returns array of 7 entries, each being an array of allergen objects (or [] for blank).
- * maxPerBottle: max allergens to mix in one bottle.
+ * Build rotation: cycles through ALL unique pairs of confirmed allergens.
+ * Each allergen hits ~3x per 7-day cycle. Rotates which pair starts each week
+ * so every combination is seen across weeks.
+ * If n is large, also uses triples to keep things manageable (max 3 per bottle).
  */
-function buildWeekRotation(confirmed, targetFreq, maxPerBottle) {
+function buildRotation(confirmed, totalDays) {
   const n = confirmed.length;
-  if (n === 0) return Array(7).fill([]);
+  if (n === 0) return Array(totalDays).fill([]);
 
-  // We need n * targetFreq slots across 7 days, each slot holds up to maxPerBottle
-  // Strategy: round-robin with combos, seeded deterministically
-  const slots = []; // each slot = array of allergen objects
-  // Create a list of (allergen, count_remaining) and distribute
-  // Use a greedy combination approach: fill each day with up to maxPerBottle
-  // ensuring each allergen hits targetFreq
+  // Generate all unique pairs
+  const pairs = [];
+  for (let i = 0; i < n; i++)
+    for (let j = i + 1; j < n; j++)
+      pairs.push([confirmed[i], confirmed[j]]);
 
-  // Build a count array
-  const counts = confirmed.map(() => targetFreq);
-  const week = Array(7).fill(null).map(() => []);
-
-  // Assign allergens to days greedily, rotating start index each day
-  let startIdx = 0;
-  for (let day = 0; day < 7; day++) {
-    let added = 0;
-    let tried = 0;
-    let idx = startIdx;
-    while (added < maxPerBottle && tried < n) {
-      if (counts[idx] > 0) {
-        week[day].push(confirmed[idx]);
-        counts[idx]--;
-        added++;
-      }
-      idx = (idx + 1) % n;
-      tried++;
-    }
-    startIdx = (startIdx + Math.max(1, maxPerBottle)) % n;
-  }
-
-  // If any counts remain (can happen with odd combos), sprinkle leftovers
-  for (let i = 0; i < n; i++) {
-    let remaining = counts[i];
-    for (let day = 0; day < 7 && remaining > 0; day++) {
-      if (week[day].length < maxPerBottle && !week[day].includes(confirmed[i])) {
-        week[day].push(confirmed[i]);
-        remaining--;
+  // Tile pairs across days, shifting start each week for variety
+  const result = [];
+  let weekOffset = 0;
+  while (result.length < totalDays) {
+    for (let i = 0; i < 7 && result.length < totalDays; i++) {
+      const pairIdx = (weekOffset + i) % pairs.length;
+      // Every `pairs.length`th day is blank (natural gap)
+      // Only insert blank if we've completed a full pairs cycle this week
+      if (i < pairs.length) {
+        result.push(pairs[(weekOffset + i) % pairs.length]);
+      } else {
+        result.push([]);
       }
     }
+    weekOffset = (weekOffset + 1) % pairs.length;
   }
-
-  return week;
+  return result.slice(0, totalDays);
 }
 
 // ── Schedule builder ──────────────────────────────────────────────────────────
 function buildSchedule() {
-  const schedule = []; // array of day objects indexed by day number (1-based)
-  // Each entry: { day, phase, newAllergen, bottleContents:[], note }
+  const schedule = [];
 
   // ── PHASE 1: Days 1–30 ───────────────────────────────────────────────────
-  // Introduce soy, milk, egg, peanut (3 days each: intro, confirm, rest)
-  // Then rotate all 4 confirmed allergens for the rest of Phase 1.
-  const phase1Core = ALL_ALLERGENS.slice(0, 4); // soy, milk, egg, peanut
-  const phase1Intro = []; // confirmed so far during intros
+  // Each allergen: 3 days — intro solo, confirm (+ 1 prior), maintain (+ different prior)
+  // Then rotate all 4 using all unique pairs.
+  const phase1Core = ALL_ALLERGENS.slice(0, 4);
+  const confirmed = [];
+  let day = 1;
 
-  // Intro days: 3 days per allergen = 12 days total
   for (let i = 0; i < phase1Core.length; i++) {
     const a = phase1Core[i];
-    const dayBase = i * 3 + 1;
 
-    // Day 1 of intro: solo introduction
-    schedule.push({
-      day: dayBase,
-      phase: 'intro',
-      newAllergen: a,
+    // Day 1: solo intro
+    schedule.push({ day: day++, phase: 'intro', newAllergen: a,
       bottleContents: [a],
-      note: `Introduce ${a.name} alone — start small (¼ tsp) and watch for 2 hours.`
-    });
+      note: `Introduce ${a.name} alone — start small (¼ tsp) and watch for 2 hours.` });
 
-    // Day 2 of intro: confirm + mix with already-confirmed
-    const mixWith = [...phase1Intro];
-    schedule.push({
-      day: dayBase + 1,
-      phase: 'confirm',
-      newAllergen: a,
-      bottleContents: [a, ...mixWith],
-      note: `Confirming ${a.name}. Mix with all previously confirmed allergens.`
-    });
+    // Day 2: confirm — pair with last confirmed (if any)
+    const confirmPair = confirmed.length > 0 ? [a, confirmed[confirmed.length - 1]] : [a];
+    schedule.push({ day: day++, phase: 'confirm', newAllergen: a,
+      bottleContents: confirmPair,
+      note: `Confirming ${a.name}${confirmed.length > 0 ? ', paired with ' + confirmed[confirmed.length-1].name : ' alone'}.` });
 
-    phase1Intro.push(a);
+    // Day 3: maintain — pair with a DIFFERENT prior confirmed if possible (for variety)
+    let maintainPair;
+    if (confirmed.length >= 2) {
+      // Pick the confirmed allergen NOT used on day 2
+      const different = confirmed.find(c => c !== confirmed[confirmed.length - 1]);
+      maintainPair = [a, different];
+    } else if (confirmed.length === 1) {
+      maintainPair = [a, confirmed[0]]; // only one option
+    } else {
+      maintainPair = [a]; // first allergen, no pair yet
+    }
+    schedule.push({ day: day++, phase: 'maintenance', newAllergen: null,
+      bottleContents: maintainPair,
+      note: `Maintaining ${a.name}${maintainPair.length > 1 ? ', paired with ' + maintainPair[1].name : ''}.` });
 
-    // Day 3: rest/blank (unless last allergen)
-    schedule.push({
-      day: dayBase + 2,
-      phase: i < phase1Core.length - 1 ? 'blank' : 'maintenance',
-      newAllergen: null,
-      bottleContents: [],
-      note: i < phase1Core.length - 1
-        ? 'Rest day — breast milk only. Watch for any delayed reactions.'
-        : 'All 4 Phase 1 allergens confirmed! Rest before starting rotation.'
-    });
+    confirmed.push(a);
   }
 
-  // Days 13–30: rotate all 4 confirmed allergens (3x/week each, max 2 per bottle)
-  // That's 18 days of rotation
-  const confirmed4 = [...phase1Core];
-  // 4 allergens × 3x/week = 12 slots across 7 days, max 2/bottle → 6 bottles, 1 blank/week
-  const rotationWeeks1 = Math.ceil(18 / 7);
-  let rotDay = 13;
-  for (let w = 0; w < rotationWeeks1 && rotDay <= 30; w++) {
-    const weekRotation = buildWeekRotation(confirmed4, 3, 2);
-    for (let d = 0; d < 7 && rotDay <= 30; d++, rotDay++) {
-      const contents = weekRotation[d];
-      schedule.push({
-        day: rotDay,
-        phase: contents.length === 0 ? 'blank' : 'maintenance',
-        newAllergen: null,
-        bottleContents: contents,
-        note: contents.length === 0
-          ? 'Rest day — breast milk only.'
-          : `Maintenance mix: ${contents.map(a=>a.name).join(' + ')}`
-      });
-    }
+  // Days 13–30: rotate all 4 using all unique pairs (6 combos, 3x/week each allergen)
+  const rotDays = 30 - day + 1;
+  const rotation = buildRotation(confirmed, rotDays);
+  for (let i = 0; i < rotDays; i++) {
+    const contents = rotation[i];
+    schedule.push({ day: day++, phase: contents.length === 0 ? 'blank' : 'maintenance',
+      newAllergen: null, bottleContents: contents,
+      note: contents.length === 0 ? 'Breast milk only today.' : `Rotation: ${contents.map(a=>a.name).join(' + ')}` });
   }
 
   // ── PHASE 2: Days 31–60 ──────────────────────────────────────────────────
-  // Introduce remaining 7 allergens one at a time (3 days each = 21 days for 7)
-  // Then rotate ALL confirmed allergens for remaining days
-  const phase2New = ALL_ALLERGENS.slice(4); // 7 allergens
-  const confirmedAll = [...phase1Core]; // grows as we confirm new ones
+  // Introduce 7 new allergens — 3 days each (intro solo, confirm, maintain).
+  // Confirm/maintain days use varied pairings from already-confirmed list.
+  const phase2New = ALL_ALLERGENS.slice(4);
+  const confirmedAll = [...confirmed]; // all 4 phase1 allergens confirmed
+  day = 31;
 
-  let p2Day = 31;
-
-  // Introduce each new allergen: 3 days (intro solo, confirm + sample of confirmed, blank)
-  for (let i = 0; i < phase2New.length && p2Day <= 57; i++) {
+  for (let i = 0; i < phase2New.length; i++) {
     const a = phase2New[i];
+    const prev = confirmedAll[confirmedAll.length - 1];
+    const prev2 = confirmedAll.length >= 2 ? confirmedAll[confirmedAll.length - 2] : null;
 
-    // Intro day: solo
-    schedule.push({
-      day: p2Day++,
-      phase: 'intro',
-      newAllergen: a,
+    // Day 1: solo intro
+    schedule.push({ day: day++, phase: 'intro', newAllergen: a,
       bottleContents: [a],
-      note: `Introducing ${a.name} solo. Watch for 2 hours after feeding.`
-    });
+      note: `Introducing ${a.name} solo. Watch for 2 hours after feeding.` });
 
-    // Confirm day: new allergen + up to 2 confirmed others (keep bottle manageable)
-    const sampleConfirmed = confirmedAll.slice(-2); // last 2 confirmed
-    schedule.push({
-      day: p2Day++,
-      phase: 'confirm',
-      newAllergen: a,
-      bottleContents: [a, ...sampleConfirmed],
-      note: `Confirming ${a.name}. Mixed with recently confirmed allergens.`
-    });
+    // Day 2: confirm — pair with most recent confirmed
+    schedule.push({ day: day++, phase: 'confirm', newAllergen: a,
+      bottleContents: [a, prev],
+      note: `Confirming ${a.name}, paired with ${prev.name}.` });
+
+    // Day 3: maintain — pair with a DIFFERENT confirmed allergen for variety
+    const maintainWith = prev2 && prev2 !== prev ? prev2 : prev;
+    schedule.push({ day: day++, phase: 'maintenance', newAllergen: null,
+      bottleContents: [a, maintainWith],
+      note: `Maintaining ${a.name}, paired with ${maintainWith.name}.` });
 
     confirmedAll.push(a);
 
-    // Rest day
-    schedule.push({
-      day: p2Day++,
-      phase: 'blank',
-      newAllergen: null,
-      bottleContents: [],
-      note: 'Rest day — breast milk only. Watch for delayed reactions.'
-    });
-  }
-
-  // Days after all intros through day 60: rotate all confirmed allergens
-  // With 11 allergens × 2x/week = 22 slots, max 4/bottle → 6 bottles + 1 blank
-  while (p2Day <= 60) {
-    const weekRotation = buildWeekRotation(confirmedAll, 2, 3);
-    for (let d = 0; d < 7 && p2Day <= 60; d++, p2Day++) {
-      const contents = weekRotation[d];
-      schedule.push({
-        day: p2Day,
-        phase: contents.length === 0 ? 'blank' : 'maintenance',
-        newAllergen: null,
-        bottleContents: contents,
-        note: contents.length === 0
-          ? 'Rest day — breast milk only.'
-          : `Full rotation: ${contents.map(a=>a.name).join(' + ')}`
-      });
+    // Fill 1 rotation day between intros (keeps all prior allergens exposed)
+    if (i < phase2New.length - 1 && day <= 60) {
+      const rot = buildRotation(confirmedAll, 1);
+      const contents = rot[0];
+      schedule.push({ day: day++, phase: contents.length === 0 ? 'blank' : 'maintenance',
+        newAllergen: null, bottleContents: contents,
+        note: `Rotation: ${contents.map(a=>a.name).join(' + ')}` });
     }
   }
 
-  // Sort by day just in case
-  schedule.sort((a, b) => a.day - b.day);
+  // Fill remaining days up to 60 with full pair rotation
+  if (day <= 60) {
+    const remaining = 60 - day + 1;
+    const rot = buildRotation(confirmedAll, remaining);
+    for (let f = 0; f < remaining; f++) {
+      const contents = rot[f];
+      schedule.push({ day: day++, phase: contents.length === 0 ? 'blank' : 'maintenance',
+        newAllergen: null, bottleContents: contents,
+        note: contents.length === 0 ? 'Breast milk only today.' : `Full rotation: ${contents.map(a=>a.name).join(' + ')}` });
+    }
+  }
 
-  // Ensure we have exactly days 1–60 (fill any gaps with blank)
+  // Ensure exactly days 1–60
+  schedule.sort((a, b) => a.day - b.day);
   const byDay = {};
   for (const s of schedule) byDay[s.day] = s;
   const full = [];
   for (let d = 1; d <= 60; d++) {
-    full.push(byDay[d] || {
-      day: d, phase: 'blank', newAllergen: null, bottleContents: [],
-      note: 'Rest day — breast milk only.'
-    });
+    full.push(byDay[d] || { day: d, phase: 'blank', newAllergen: null, bottleContents: [],
+      note: 'Breast milk only today.' });
   }
   return full;
 }
@@ -606,7 +557,7 @@ function scienceNotes() {
 
 function supportLine() {
   return `<div class="support-line">
-    I built this to solve my own problem! But if this app helps you and your family, please consider supporting this work <a href="https://paypal.me/JoshuaLeskar">via PayPal</a> or <a href="https://venmo.com/JLeskar">Venmo</a>. 💙
+    If this app helps your family, please consider supporting this work <a href="https://paypal.me/JoshuaLeskar">via PayPal</a> or <a href="https://venmo.com/JLeskar">Venmo</a>. 💙
   </div>`;
 }
 
